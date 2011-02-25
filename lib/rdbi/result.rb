@@ -119,7 +119,7 @@ class RDBI::Result
   # by the current +driver+.
   #
   def each
-    while row = @fetch_handle.fetch(1)[0] and !row.empty?
+    while row = @fetch_handle.fetch_one
       yield(row)
     end
   end
@@ -325,8 +325,13 @@ end
 # RDBI::Result::Driver additionally provides two methods, convert_row and
 # convert_item, which leverage RDBI's type conversion facility (see RDBI::Type)
 # to assist in type conversion. For performance reasons, RDBI chooses to
-# convert on request instead of preemptively, so <b>it is the driver implementor's
-# job to do any conversion</b>.
+# convert on request instead of preemptively, so <b>it is the driver
+# implementor's job to do any conversion</b>.
+#
+# If your result driver does not represent a set of rows as an array of
+# rows (however rows are represented), you will additionally need to define
+# a method fetch_one so that RDBI::Result#each knows when it has reached
+# eof on the underlying cursor.  See the :CSV result driver, for example.
 #
 # If you wish to implement a constructor in your class, please see
 # RDBI::Result::Driver.new.
@@ -343,30 +348,42 @@ class RDBI::Result::Driver
   end
 
   #
-  # Fetch the result with any transformations. The default is to present the
-  # type converted array.
+  # Fetch the specified number of rows with any transformations.  The default
+  # is to return an array of rows, themselves presented as type converted
+  # arrays.
   #
   def fetch(row_count)
     rows = RDBI::Util.format_results(row_count, (@result.raw_fetch(row_count) || []))
 
     if rows.nil?
-      return rows 
+      return rows
     elsif [:first, :last].include?(row_count)
       return convert_row(rows)
     else
       result = []
-      rows.each do |row| 
+      rows.each do |row|
         result << convert_row(row)
       end
     end
     return result
   end
 
+  #
+  # Fetch and return a single row, or nil if the cursor is exhausted.  For
+  # result drivers which return arrays of rows, this method is equivalent to
+  # `rd.fetch(1)[0]'.
+  #
+  # Used by Result#each
+  #
+  def fetch_one
+    fetch(1)[0]
+  end
+
   protected
 
   def convert_row(row)
     return [] if row.nil?
-    
+
     row.each_with_index do |x, i|
       row[i] = RDBI::Type::Out.convert(x, @result.schema.columns[i], @result.type_hash)
     end
@@ -413,6 +430,15 @@ class RDBI::Result::Driver::CSV < RDBI::Result::Driver
       csv_string << row.to_csv
     end
     return csv_string
+  end
+
+  #
+  # Return a single row as CSV, or nil if the cursor is exhausted.
+  #
+  def fetch_one
+    row = fetch(1)
+    return nil if row == ""
+    row
   end
 end
 
@@ -471,12 +497,12 @@ end
 #
 # Will yield:
 #
-#   --- 
+#   ---
 #   - :i: 1
-#     :x: bar 
+#     :x: bar
 #   - :i: 2
 #     :x: foo
-#   - :i: 3 
+#   - :i: 3
 #     :x: quux
 #
 class RDBI::Result::Driver::YAML < RDBI::Result::Driver
@@ -495,6 +521,21 @@ class RDBI::Result::Driver::YAML < RDBI::Result::Driver
         Hash[column_names.zip(row)]
       end.to_yaml
     end
+  end
+
+  #
+  # Return nil if cursor is exhausted, else a single row in YAML format.
+  #
+  def fetch_one
+    column_names = @result.schema.columns.map(&:name)
+    row = Hash[column_names.zip(@result.raw_fetch(1)[0])].to_yaml
+    return nil if row == eof
+    row
+  end
+
+  private
+  def eof
+    @eof ||= [].to_yaml
   end
 end
 
